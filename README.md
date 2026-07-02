@@ -31,8 +31,10 @@ no manager actor to spawn, no per-actor registration to maintain.
   thumbnail, and delete slots — everything a Save / Load screen needs.
 - **Per-actor control** — opt an actor out of saving, out of transform restore,
   or mark it as level-independent, straight from the saveable interface.
-- **Optional load-on-startup** — flip one setting and a single-player game
-  restores its slot automatically on launch, with no Blueprint or C++ wiring.
+- **Optional auto-load** — flip one setting and a single-player game restores
+  its slot automatically on launch *and* on every map travel, with no Blueprint
+  or C++ wiring. Each map comes back as you saved it; maps you never saved start
+  fresh, with the pawn left at its PlayerStart.
 - **Compressed saves** — files are Oodle-compressed on a background thread
   (toggle in Project Settings). Loading auto-detects the format, so old saves
   keep working when you flip the setting either way.
@@ -96,7 +98,15 @@ then tick **SaveGame** in the advanced details of any variable you want to keep.
 - `Save Game (Sync)` / `Load Game (Sync)` — blocking; use only at startup.
 
 The async nodes also broadcast the subsystem-wide `On Save Completed` /
-`On Load Completed` events if you prefer a single global handler.
+`On Load Completed` events if you prefer a single global handler. To bind those
+events, drop the `Get Save Core Manager` node (also single-node) and bind on it.
+
+> **Blueprint surface — every call is a single node.** All of SaveCore Pro's
+> Blueprint functions (save/load, slot management, backups, slot info, thumbnails,
+> auto-save, versioning) are static helpers with a hidden world-context pin, so you
+> just drop the node into any actor/widget graph — **no "Get Subsystem" or Target
+> wiring**, exactly like the async nodes. (In C++ you still call the
+> `USCPSaveManagerSubsystem` methods directly, as shown below.)
 
 **C++** — call the subsystem directly; pass an optional callback for the result:
 
@@ -128,26 +138,24 @@ the previous level's coordinates. This is automatic — nothing to configure.
 ## Runtime-spawned actors
 
 Actors placed in the level are matched by their level path automatically.
-Actors spawned at runtime need a stable identity that survives a reload — give
-them one by overriding `GetRuntimeActorID()`:
+Actors spawned at runtime work the same way with **no extra setup and no identity
+code** — SaveCore Pro identifies each one by its object name and re-spawns it under
+that exact name on load, so a save → reload re-creates and re-hydrates them
+automatically. Just implement `ISCPSaveableInterface` and tag the fields you want
+persisted with `UPROPERTY(SaveGame)`:
 
 ```cpp
-UPROPERTY(SaveGame)
-FGuid RuntimeID;
-
-virtual void BeginPlay() override
+UCLASS()
+class AMyPickup : public AActor, public ISCPSaveableInterface
 {
-    Super::BeginPlay();
-    if (!RuntimeID.IsValid()) RuntimeID = FGuid::NewGuid();
-}
+    GENERATED_BODY()
 
-FString GetRuntimeActorID_Implementation() const override
-{
-    return RuntimeID.ToString();
-}
+    UPROPERTY(SaveGame)
+    int32 Quantity = 1;   // saved & restored automatically
+};
 ```
 
-SaveCore Pro will re-spawn and re-hydrate these actors on load.
+SaveCore Pro re-spawns and re-hydrates these actors on load.
 
 > **Streaming note:** runtime-spawned actors are re-spawned on load only for the
 > *persistent* level. Spawn long-lived persistent actors into the persistent
@@ -235,13 +243,15 @@ if (SM->GetSaveSlotInfo(TEXT("Slot_0"), 0, Info)) { /* … */ }
 SM->DeleteSave(TEXT("Slot_0"));
 ```
 
-All of these are exposed to Blueprint (`Get All Save Slots`, `Get All Save Slot
-Infos`, `Get Save Slot Info`, `Delete Save`).
+All of these are exposed to Blueprint as **single-node** helpers (`Get All Save
+Slots`, `Get All Save Slot Infos`, `Get Save Slot Info`, `Delete Save`) — just drop
+the node into any graph, no "Get Subsystem" wiring needed (see *Blueprint surface*
+below).
 
 ## Thumbnails
 
 Attach a screenshot to a slot for your save menu. Everything is **asynchronous** —
-the screenshot capture, the PNG encode, and the disk I/O all stay off the game
+the screenshot capture, the image encode, and the disk I/O all stay off the game
 thread, so saving or loading a thumbnail never hitches the frame.
 
 **Blueprint** — three latent nodes, each with `On Completed` / `On Failed` (the
@@ -263,12 +273,15 @@ SM->LoadThumbnailAsync(TEXT("Slot_0"), 0,
     [](UTexture2D* Thumb){ if (Thumb) { /* assign to UImage */ } });
 ```
 
-`SaveThumbnailFromViewport` captures through the engine's screenshot system rather
-than reading the backbuffer directly — a swapchain backbuffer is not CPU-readable,
-so a direct read returns black in a packaged/standalone build; this is the path that
-works outside the editor. By default the HUD/Slate UI is excluded; pass
-`bIncludeUI = true` to capture it. It is also spam-safe: if a capture is already in
-flight, a second call fails fast (`On Failed`) instead of stomping the first.
+`SaveThumbnailFromViewport` has **zero frame cost** — it neither stalls the game thread
+nor the render thread. It grabs the frame with a non-blocking GPU readback (no blocking
+backbuffer read, which would also return black on a flip-model swapchain), then resizes,
+encodes and writes entirely on a worker thread. It works the same in PIE and in a
+packaged/standalone build, and captures **only the game viewport** — editor chrome and the
+PIE window's title bar are cropped out. `bIncludeUI` controls the HUD/UI: `false` (the
+default) captures the scene *before* the UI is drawn, `true` captures the final frame with
+HUD/UMG included. It is also spam-safe: if a capture is already in flight, a second call
+fails fast (`On Failed`) instead of stomping the first.
 
 If you'd rather capture a specific view (a posed hero shot, an offscreen camera,
 or a clean frame while a pause/loading screen is covering the real viewport),
@@ -316,7 +329,7 @@ travel with backups, and are per-user (`UserIndex`). `HasThumbnail` and the
   newest-first and drops the oldest once this many exist, so you can roll back more
   than one save. Recover a backup with `RestoreBackup` — pass a backup index to pick
   which one (0 = most recent, the default). `HasBackup`/`GetBackupCount` tell you
-  what's available (all `BlueprintCallable`):
+  what's available (all single-node in Blueprint via the function library):
 
   ```cpp
   // Roll back to the immediately previous save.
@@ -342,8 +355,8 @@ travel with backups, and are per-user (`UserIndex`). `HasThumbnail` and the
   By default the actor *list* is still walked on the game thread (classification, your
   `OnPreSave` hooks, component discovery). Turn this on to move that walk onto a worker too —
   the only thing that removes the remaining frame cost in scenes with *thousands* of saveable
-  actors. **Tradeoff (the EasyMultiSave model):** your `OnPreSave` / `GetSaveFlags` /
-  `GetRuntimeActorID` hooks then run on a worker thread, so they must be thread-safe — don't
+  actors. **Tradeoff (the EasyMultiSave model):** your `OnPreSave` / `GetSaveFlags`
+  hooks then run on a worker thread, so they must be thread-safe — don't
   spawn/destroy actors, touch timers, or mutate the world from them. Actor state is read off
   the game thread while gameplay ticks (a value may be a frame stale), and components added to
   an actor *after* it registers may not be captured in this mode. Set it in Project Settings
@@ -379,13 +392,13 @@ travel with backups, and are per-user (`UserIndex`). `HasThumbnail` and the
   through the platform save system either way. **Thumbnail JPEG Quality** (1–100,
   default 90) applies when JPEG is selected. Loading auto-detects the format, so
   changing this never breaks existing thumbnails.
-- **Load Save On Startup** — off by default. When on, the configured slot is
-  loaded automatically as the game's first world starts, so a single-player game
-  restores with no Blueprint or C++ setup. It fires once per session (not on
-  level transitions) and does nothing if the slot has no save yet. Leave it off
-  for menu-driven ("Continue" button) or multiplayer games, which control load
-  timing themselves.
-- **Default Slot Name** — the slot used by *Load Save On Startup* (default
+- **Auto-Load Save (Startup & Map Travel)** — off by default. When on, the
+  configured slot is loaded automatically as the game's first world starts *and*
+  again after every map travel, so a single-player game restores with no Blueprint
+  or C++ setup. It fires once per world (never per streamed sublevel) and does
+  nothing if the slot has no save yet. Leave it off for menu-driven ("Continue"
+  button) or multiplayer games, which control load timing themselves.
+- **Default Slot Name** — the slot used by *Auto-Load Save* (default
   `Slot_0`; also the auto-save fallback slot).
 - **Game Save Version** — your game's save-data version (see *Versioning* above).
 - **Runtime Actor Redirects** / **Level Redirects** — keep old saves loading after
