@@ -20,6 +20,7 @@ actors on its own and serializes the tagged fields for you.
 - [Saving and loading](#saving-and-loading)
 - [Save events](#save-events)
 - [Players and levels](#players-and-levels)
+- [Switching pawns (vehicles, mounts, characters)](#switching-pawns-vehicles-mounts-characters)
 - [Runtime-spawned actors](#runtime-spawned-actors)
 - [Save slots and menus](#save-slots-and-menus)
 - [Thumbnails](#thumbnails)
@@ -45,6 +46,7 @@ actors on its own and serializes the tagged fields for you.
 | 💥 | **Destruction that sticks — both ways** — a destroyed crate stays destroyed after loading; load an *older* save where it was alive and it comes back, identity and all. |
 | 🏃 | **Momentum preserved** — a crate saved mid-roll keeps rolling; a player saved mid-jump keeps their arc. Automatic. |
 | 👥 | **Multiplayer-ready** — per-player data is keyed by a stable ID that survives reconnects and restarts. |
+| 🚗 | **Possession restored** — save while driving a vehicle or playing a second character, and loading puts you back **in that pawn** (opt-in). |
 | ⚡ | **Async by default** — saving and loading run off the game thread, with events to tell you when they finish. |
 | 🖼️ | **Save-menu ready** — list slots, read their metadata without loading, grab a screenshot thumbnail, and delete — everything a Load screen needs. |
 | 🗜️ | **Compressed saves** — Oodle compression on a background thread; loading auto-detects the format. |
@@ -210,6 +212,35 @@ A player's **state** and their **position** are handled differently, on purpose:
   instead of being teleported to the last level's coordinates.
 
 This is automatic — nothing to configure.
+
+---
+
+## Switching pawns (vehicles, mounts, characters)
+
+By default, loading applies the saved pawn data to whichever pawn the player currently
+controls — exactly right for games with one player pawn. If your game **switches pawns**
+(drivable vehicles, mounts, multiple playable characters), turn on
+**Project Settings → Plugins → SaveCore Pro → Restore Possessed Pawn**, and loading puts
+each player back **in the pawn they were possessing when the save was written**:
+
+- The saved pawn is found again by its stable identity — or, if it was runtime-spawned and
+  no longer exists (a fresh game launch), **re-spawned** from its saved class, at its saved
+  spot, under its original identity.
+- The pawn the GameMode just spawned at the `PlayerStart` doesn't linger: it's handed back
+  to the normal level rules, so a default pawn unknown to the save is cleaned up.
+- It's per-level, like position: loading into a level where the player never possessed
+  anything leaves the default pawn in place.
+
+Nothing else changes — the pawn's `SaveGame` fields, transform, and momentum restore exactly
+as they always do, just onto the right pawn.
+
+> 🛡️ **Even with this off**, SaveCore Pro never applies pawn data saved from one pawn
+> *class* to a pawn of a different class (it would corrupt same-named variables). If a save
+> written in a vehicle is loaded without possession restore, the default pawn keeps its own
+> data and only the position applies — and the log tells you why.
+
+> ℹ️ Leave it **off** if your game re-mounts/re-possesses players itself on load — two
+> systems fighting over possession helps no one.
 
 ---
 
@@ -502,6 +533,7 @@ if (SM->GetSaveSlotVersion(TEXT("Slot_0"), 0, FileVersion))
 | **Thumbnail Format** | PNG | PNG (lossless) or JPEG (smaller). **Thumbnail JPEG Quality** (1–100) applies to JPEG. |
 | **Auto-Load Save (Startup & Map Travel)** | Off | Loads the default slot on launch and after each map travel. See below. |
 | **Default Slot Name** | `Slot_0` | Slot used by auto-load; also the auto-save fallback. |
+| **Restore Possessed Pawn** | Off | Puts each player back in the pawn they were possessing when the save was written (see [Switching pawns](#switching-pawns-vehicles-mounts-characters)). |
 | **Game Save Version** | 1 | Your game's save-data version (see [Save versioning](#save-versioning)). |
 | **Runtime Actor Redirects** / **Level Redirects** | *(empty)* | Keep old saves loading after you rename assets (see [Redirectors](#redirectors)). |
 
@@ -621,6 +653,7 @@ the package path without any PIE prefix.
 | **Nothing saves in multiplayer.** | Save/load only runs on the **server** or standalone. Calls on a client are ignored by design. |
 | **A runtime actor doesn't come back after load.** | It was spawned into a streaming sublevel. Runtime actors are re-spawned only for the *persistent* level — spawn it there, or mark it `bPersistent`. |
 | **The player teleports to the wrong place across levels.** | That's expected: position is per-level. A level you never saved in leaves the player at its `PlayerStart`. |
+| **I saved while driving a vehicle / playing another character, but loading puts me in the default pawn.** | Turn on **Restore Possessed Pawn** (see [Switching pawns](#switching-pawns-vehicles-mounts-characters)). Without it, loading applies data to the current pawn only — and refuses it entirely if the saved pawn was a different class. |
 | **Old saves stopped loading after I renamed an asset/map.** | Add a [Runtime Actor Redirect or Level Redirect](#redirectors). |
 | **A new game inherits the previous game's world.** | Call **Clear Save State (New Game)** before starting the new run. |
 
