@@ -166,6 +166,13 @@ The player's Pawn transform and any `UPROPERTY(SaveGame)` fields on the **Pawn**
 **PlayerState**, and **PlayerController** are captured automatically — **no interface
 required on the Pawn**.
 
+> 💡 The same goes for **GameMode** and **GameState**: player and game framework classes
+> save through their own dedicated channels, never as world actors. Adding the SaveCore
+> interface to one of them is harmless and optional — it enables the `OnPreSave` /
+> `OnPostLoad` hooks, nothing else. And if different maps use different GameModes — with
+> different PlayerState, PlayerController, or default-pawn classes — each class keeps its
+> own saved state; nothing crosses over or gets overwritten between maps.
+
 > 💡 **Every call is a single node.** All of SaveCore Pro's Blueprint functions
 > (save/load, slots, backups, thumbnails, auto-save, versioning) are helpers with a
 > hidden world-context pin, so you just drop them into any actor or widget graph —
@@ -226,13 +233,36 @@ each player back **in the pawn they were possessing when the save was written**:
 - The saved pawn is found again by its stable identity — or, if it was runtime-spawned and
   no longer exists (a fresh game launch), **re-spawned** from its saved class, at its saved
   spot, under its original identity.
+- If the saved pawn is gone but the pawn the player already controls is the **same class**
+  (the usual case after a restart), that pawn is simply kept and restored in place — no
+  needless respawn, and everything your GameMode set up on it stays intact.
 - The pawn the GameMode just spawned at the `PlayerStart` doesn't linger: it's handed back
   to the normal level rules, so a default pawn unknown to the save is cleaned up.
 - It's per-level, like position: loading into a level where the player never possessed
   anything leaves the default pawn in place.
+- A saved pawn that another **player** currently controls is never yanked away from them —
+  the loading player keeps their current pawn instead. (A pawn idling under the engine's
+  default AI possession — every level-placed pawn, unless you disabled *Auto Possess AI* —
+  is simply taken back, like entering a parked vehicle.)
+- The pawn you switch **away** from keeps its state, per level: save while driving in
+  Level 1, walk on foot through Level 2 and save again — coming back to Level 1 restores
+  the vehicle exactly as you left it, saved fields and all. Later saves in other pawns
+  never overwrite it — **even between two pawns of the same class** (a vehicle at 90 fuel
+  in Level 1 and one at 80 in Level 2 each keep their own tank), map-placed or
+  runtime-spawned alike.
+- A save made while you have **no pawn at all** (dead, spectating) never erases your pawn
+  data — it carries forward untouched.
 
 Nothing else changes — the pawn's `SaveGame` fields, transform, and momentum restore exactly
 as they always do, just onto the right pawn.
+
+> ⚠️ **Two design notes.** Prefer **runtime-spawned** pawns for switching: a *map-placed*
+> pawn that gets destroyed later can't be re-created by the restore (placed actors are
+> governed by the destroyed-actors rules, and a possessed pawn carries no level record).
+> And don't reuse your GameMode's **default pawn class** for switchable world pawns — a
+> runtime pawn of that exact class is treated as your player's re-spawned avatar (that's
+> what makes restarts "just work"), so give drivable/mountable world instances their own
+> subclass.
 
 > 🛡️ **Even with this off**, SaveCore Pro never applies pawn data saved from one pawn
 > *class* to a pawn of a different class (it would corrupt same-named variables). If a save
@@ -268,6 +298,20 @@ A save → reload re-creates and re-hydrates these actors for you.
 > *persistent* level. Spawn long-lived actors into the persistent level (the default) rather
 > than a streaming sublevel. Placed actors inside sublevels and World Partition cells are
 > restored normally.
+
+### AI enemies and NPCs
+
+An AI **pawn** saves exactly like the pickup above — implement the interface, tag the
+fields — whether it's placed in the map or spawned at runtime. Two rules keep AI painless:
+
+- **Put saveable state on the pawn (or a component), not the AI controller.** Controllers
+  are session objects the world can't meaningfully re-create, so SaveCore Pro never saves or
+  deletes them — blackboard-style values you want persisted belong in `SaveGame` fields on
+  the pawn.
+- For **runtime-spawned** AI, set the pawn's **Auto Possess AI** to
+  *Placed in World or Spawned* — then the pawn SaveCore Pro re-spawns on load gets its AI
+  controller from the engine automatically, instead of standing brainless. (Level-placed AI
+  pawns already re-possess on level start with the default setting.)
 
 ---
 
